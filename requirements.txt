@@ -1,0 +1,12 @@
+# Install torch first with CUDA 12.1 wheels:
+#   uv pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+# Then:
+#   uv pip install -r requirements.txt
+
+faster-whisper==1.0.3
+pyannote.audio==3.3.2
+huggingface_hub<1.0           # pyannote 3.3 still uses removed use_auth_token arg
+sounddevice==0.5.1
+soundfile==0.12.1
+numpy<2.0
+python-dotenv==1.0.1
