@@ -93,9 +93,25 @@ log "downloading native binaries (whisper-server + llama-server + sherpa-onnx)"
 # transcription features — skip unless you use them.
 
 # ---------- 4. Ollama (native preferred, Docker optional) ----------
-# Default path: native Ollama installed via `brew install ollama`.
-# Docker compose is still supported for home-server / remote-GPU setups but
-# is no longer required for daily local use.
+# Default path: native Ollama installed via `brew install ollama` (mac) or
+# `winget install Ollama.Ollama` (Windows). Docker compose is still supported
+# for home-server / remote-GPU setups but not required for daily local use.
+# On Windows, winget installs to %LOCALAPPDATA%\Programs\Ollama which isn't
+# always on Git Bash PATH after a fresh install — probe known locations and
+# prepend to PATH so subsequent commands find it.
+if ! command -v ollama >/dev/null 2>&1; then
+  for candidate in \
+    "/c/Users/$USER/AppData/Local/Programs/Ollama" \
+    "$LOCALAPPDATA/Programs/Ollama" \
+    "/c/Program Files/Ollama"
+  do
+    if [[ -x "$candidate/ollama.exe" ]]; then
+      export PATH="$candidate:$PATH"
+      log "found ollama at $candidate (prepended to PATH)"
+      break
+    fi
+  done
+fi
 if command -v ollama >/dev/null 2>&1; then
   if ! curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
     log "starting native ollama service (brew services)"
