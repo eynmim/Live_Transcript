@@ -1,0 +1,65 @@
+diff --git a/main.js b/main.js
+index 4c11863..eab90fc 100644
+--- a/main.js
++++ b/main.js
+@@ -204,6 +204,43 @@ if (process.platform === "darwin" && app.getName() !== "OpenWhispr") {
+   app.setName("OpenWhispr");
+ }
+ 
++// talktype patch: write a structured panic dump so crashes during
++// dictation are debuggable after the fact. Dump lands in a
++// platform-appropriate panic/ dir (see path below) as panic-<iso-ts>.json.
++// No audio buffer here (OpenWhispr only persists audio after transcription
++// completes), but the dump tells you what the user was doing when things
++// blew up.
++function _talktypeWritePanicDump(kind, errorLike) {
++  try {
++    const fs = require("fs");
++    const os = require("os");
++    const pathMod = require("path");
++    const panicSubdir =
++      process.platform === "darwin" ? "Library/Logs/talktype/panic" :
++      process.platform === "win32"  ? "AppData/Roaming/talktype/panic" :
++                                      ".local/share/talktype/panic";
++    const panicDir = pathMod.join(os.homedir(), panicSubdir);
++    fs.mkdirSync(panicDir, { recursive: true });
++    const ts = new Date().toISOString().replace(/[:.]/g, "-");
++    const err = errorLike instanceof Error ? errorLike : new Error(String(errorLike));
++    const payload = {
++      kind,
++      ts: new Date().toISOString(),
++      message: err.message,
++      stack: err.stack || "",
++      code: err.code || null,
++      node: process.version,
++      electron: process.versions?.electron || null,
++      platform: process.platform,
++      arch: process.arch,
++      argv: process.argv,
++      pid: process.pid,
++    };
++    fs.writeFileSync(pathMod.join(panicDir, `panic-${ts}.json`), JSON.stringify(payload, null, 2));
++    // eslint-disable-next-line no-console
++    console.error(`[talktype] panic dump written: panic-${ts}.json`);
++  } catch (writeErr) {
++    // eslint-disable-next-line no-console
++    console.error("[talktype] panic dump FAILED:", writeErr && writeErr.message);
++  }
++}
++
+ // Add global error handling for uncaught exceptions
+ process.on("uncaughtException", (error) => {
+   console.error("Uncaught Exception:", error);
+@@ -213,10 +250,12 @@ process.on("uncaughtException", (error) => {
+   }
+   // For other errors, log and continue
+   console.error("Error stack:", error.stack);
++  _talktypeWritePanicDump("uncaughtException", error);
+ });
+ 
+ process.on("unhandledRejection", (reason, promise) => {
+   console.error("Unhandled Rejection at:", promise, "reason:", reason);
++  _talktypeWritePanicDump("unhandledRejection", reason);
+ });
+ 
+ // Import helper module classes (but don't instantiate yet - wait for app.whenReady())

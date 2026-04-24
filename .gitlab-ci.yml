@@ -1,0 +1,75 @@
+# GitLab CI for talktype.
+# Mirror of .github/workflows/ci.yml — runs on every push + MR.
+#
+# Two stages:
+#   1. wrapper — lint + typecheck + vitest on a small Node image (fast)
+#   2. app-build — clone OpenWhispr + install + build unsigned artifact (macOS + Windows via runners, if available)
+
+stages:
+  - wrapper
+  - app-build
+
+default:
+  # Pinned Node 24 to match .nvmrc and OpenWhispr's engines constraint.
+  image: node:24-bookworm-slim
+  interruptible: true
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 1 — wrapper: lint / typecheck / vitest
+# Small, fast, runs on every push.
+# ──────────────────────────────────────────────────────────────────────
+wrapper:test:
+  stage: wrapper
+  cache:
+    key:
+      files:
+        - wrapper/package-lock.json
+        - wrapper/package.json
+    paths:
+      - wrapper/node_modules/
+  script:
+    - cd wrapper
+    - npm ci || npm install
+    - npm run typecheck
+    - npm run lint
+    - npm test -- --reporter=verbose
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# ──────────────────────────────────────────────────────────────────────
+# Stage 2 — app build (unsigned).
+# Requires a shared runner that can actually build Electron for the
+# target OS. Skipped by default (no macOS/Windows runners on gitlab.com
+# free tier) — enable by flipping the `when: manual` to `when: on_success`
+# once you have macOS Runners or Windows Shared Runners.
+# ──────────────────────────────────────────────────────────────────────
+.app_build_base: &app_build_base
+  stage: app-build
+  needs: [wrapper:test]
+  when: manual
+  script:
+    - bash ./scripts/bootstrap.sh
+    - cd wrapper && npm run build && cd ..
+    - cd app && CSC_IDENTITY_AUTO_DISCOVERY=false npm run build
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - app/dist/
+      - app/out/
+
+app:build:macos:
+  <<: *app_build_base
+  tags: [macos]
+  image: null # uses shared macOS runner if available
+
+app:build:linux:
+  <<: *app_build_base
+  tags: [docker, linux]
+  image: node:24-bookworm
+  before_script:
+    # Electron + native deps need these system libs on Linux builders.
+    - apt-get update && apt-get install -y --no-install-recommends
+        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2
+        libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2
+        libgbm1 libasound2 libgtk-3-0

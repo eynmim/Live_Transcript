@@ -1,0 +1,80 @@
+name: talktype
+
+services:
+  ollama:
+    image: ollama/ollama:0.5.4
+    container_name: talktype-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama-data:/root/.ollama
+      - ./ollama/init.sh:/init.sh:ro
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_NUM_PARALLEL=1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /bin/ollama serve &
+        SERVER_PID=$$!
+        sleep 3
+        sh /init.sh
+        wait $$SERVER_PID
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  whisper-server:
+    profiles: ["stt-server"]
+    build:
+      context: ./whisper-server
+    container_name: talktype-whisper-server
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./whisper-models:/models
+    environment:
+      - WHISPER_MODEL=/models/ggml-base.en.bin
+
+  loki:
+    profiles: ["observability"]
+    image: grafana/loki:3.1.0
+    container_name: talktype-loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki-data:/loki
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.1.0
+    container_name: talktype-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_SECURITY_ADMIN_PASSWORD=talktype
+    volumes:
+      - ./grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - loki
+
+  promtail:
+    profiles: ["observability"]
+    image: grafana/promtail:3.1.0
+    container_name: talktype-promtail
+    restart: unless-stopped
+    volumes:
+      - ./promtail/config.yaml:/etc/promtail/config.yaml:ro
+      - ${HOME}/Library/Logs/talktype:/host-logs:ro
+    command: -config.file=/etc/promtail/config.yaml
+    depends_on:
+      - loki

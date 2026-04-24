@@ -1,0 +1,25 @@
+{
+  "name": "talktype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first AI voice dictation — reliability-hardened wrapper around OpenWhispr.",
+  "license": "MIT",
+  "workspaces": [
+    "wrapper"
+  ],
+  "scripts": {
+    "bootstrap": "./scripts/bootstrap.sh",
+    "doctor": "./scripts/doctor.sh",
+    "sync-upstream": "./scripts/sync-upstream.sh",
+    "test": "npm --workspace wrapper run test",
+    "lint": "npm --workspace wrapper run lint",
+    "dev": "cd app && npm run dev",
+    "build": "cd app && npm run build",
+    "backend:up": "docker compose -f docker/docker-compose.yml up -d ollama",
+    "backend:down": "docker compose -f docker/docker-compose.yml down",
+    "observability:up": "docker compose -f docker/docker-compose.yml --profile observability up -d"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

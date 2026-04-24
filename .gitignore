@@ -1,8 +1,67 @@
-.venv/
+# deps
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+
+# build output
+dist/
+build/
+out/
+*.dmg
+*.exe
+*.deb
+*.snap
+
+# env & secrets
 .env
-__pycache__/
+.env.*
+!.env.example
+*.pem
+*.key
+
+# logs & caches
+logs/
+*.log
+.npm
+.eslintcache
+.vitest-cache/
+.turbo/
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# test artifacts
+coverage/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# upstream checkout (cloned by bootstrap.sh, not committed)
+app/
+
+# local runtime data
+runtime/
+panic/
+audio-dumps/
+.talktype.pid
+
+# docker
+docker/ollama-data/
+docker/whisper-models/
+docker/grafana-data/
+docker/loki-data/
+
+# old Python project (kept as archive under old-python/)
+old-python/.venv/
+old-python/recordings/
+old-python/__pycache__/
+**/__pycache__/
 *.pyc
-recordings/
 *.wav
 *.mp3
 *.m4a

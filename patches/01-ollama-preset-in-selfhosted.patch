@@ -1,0 +1,162 @@
+diff --git a/src/components/SelfHostedPanel.tsx b/src/components/SelfHostedPanel.tsx
+index 8ffedb4..2204437 100644
+--- a/src/components/SelfHostedPanel.tsx
++++ b/src/components/SelfHostedPanel.tsx
+@@ -1,5 +1,7 @@
++import { useEffect, useMemo, useState } from "react";
+ import { useTranslation } from "react-i18next";
+ import { Input } from "./ui/input";
++import { Button } from "./ui/button";
+ 
+ interface SelfHostedPanelProps {
+   service: "transcription" | "reasoning";
+@@ -7,12 +9,90 @@ interface SelfHostedPanelProps {
+   onUrlChange: (url: string) => void;
+ }
+ 
++type ProbeState =
++  | { status: "idle" }
++  | { status: "probing" }
++  | { status: "up"; models: string[] }
++  | { status: "down"; reason: string };
++
++const OLLAMA_PRESET_URL = "http://localhost:11434/v1";
++
+ export default function SelfHostedPanel({ service, url, onUrlChange }: SelfHostedPanelProps) {
+   const { t } = useTranslation();
++  const [probe, setProbe] = useState<ProbeState>({ status: "idle" });
+ 
+   const placeholderUrl =
+     service === "transcription" ? "http://192.168.1.126:8178" : "http://192.168.1.126:8080";
+ 
++  const trimmedUrl = useMemo(() => url.trim(), [url]);
++  const isOllamaLike = useMemo(
++    () => /localhost:11434|127\.0\.0\.1:11434/.test(trimmedUrl),
++    [trimmedUrl]
++  );
++
++  useEffect(() => {
++    if (service !== "reasoning" || !isOllamaLike) {
++      setProbe({ status: "idle" });
++      return;
++    }
++    let cancelled = false;
++    (async () => {
++      setProbe({ status: "probing" });
++      try {
++        const base = trimmedUrl.endsWith("/v1")
++          ? trimmedUrl
++          : `${trimmedUrl.replace(/\/$/, "")}/v1`;
++        const ctl = new AbortController();
++        const timer = setTimeout(() => ctl.abort(), 1500);
++        const res = await fetch(`${base}/models`, { signal: ctl.signal });
++        clearTimeout(timer);
++        if (cancelled) return;
++        if (!res.ok) {
++          setProbe({ status: "down", reason: `HTTP ${res.status}` });
++          return;
++        }
++        const data = (await res.json()) as { data?: Array<{ id?: string }> };
++        const models = (data.data ?? [])
++          .map((m) => m.id)
++          .filter((id): id is string => typeof id === "string");
++        setProbe({ status: "up", models });
++      } catch (e) {
++        if (cancelled) return;
++        setProbe({
++          status: "down",
++          reason: (e as Error).name === "AbortError" ? "timeout" : (e as Error).message,
++        });
++      }
++    })();
++    return () => {
++      cancelled = true;
++    };
++  }, [trimmedUrl, isOllamaLike, service]);
++
++  const badge =
++    probe.status === "up" ? (
++      <span className="inline-flex items-center gap-1 text-xs text-emerald-500">
++        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
++        {t("settingsPage.selfHosted.ollama.reachable", {
++          count: probe.models.length,
++          defaultValue: "reachable · {{count}} models",
++        })}
++      </span>
++    ) : probe.status === "down" ? (
++      <span className="inline-flex items-center gap-1 text-xs text-red-500">
++        <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
++        {t("settingsPage.selfHosted.ollama.unreachable", {
++          reason: probe.reason,
++          defaultValue: "unreachable ({{reason}})",
++        })}
++      </span>
++    ) : probe.status === "probing" ? (
++      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
++        <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground animate-pulse" />
++        {t("settingsPage.selfHosted.ollama.probing", { defaultValue: "probing…" })}
++      </span>
++    ) : null;
++
+   return (
+     <div className="border border-border rounded-lg p-3 space-y-2.5">
+       <div className="space-y-1.5">
+@@ -25,7 +105,58 @@ export default function SelfHostedPanel({ service, url, onUrlChange }: SelfHoste
+           placeholder={placeholderUrl}
+           className="h-8 text-sm"
+         />
++        {service === "reasoning" && (
++          <div className="flex items-center justify-between pt-1">
++            <Button
++              type="button"
++              variant="secondary"
++              size="sm"
++              className="h-7 px-2 text-xs"
++              onClick={() => onUrlChange(OLLAMA_PRESET_URL)}
++            >
++              {t("settingsPage.selfHosted.ollama.preset", {
++                defaultValue: "🦙 Use local Ollama",
++              })}
++            </Button>
++            {badge}
++          </div>
++        )}
+       </div>
++
++      {service === "reasoning" && probe.status === "up" && probe.models.length > 0 && (
++        <div className="space-y-1">
++          <label className="block text-xs font-medium text-muted-foreground">
++            {t("settingsPage.selfHosted.ollama.detectedModels", {
++              defaultValue: "Detected models",
++            })}
++          </label>
++          <div className="flex flex-wrap gap-1">
++            {probe.models.map((m) => (
++              <span
++                key={m}
++                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-muted text-muted-foreground"
++              >
++                {m}
++              </span>
++            ))}
++          </div>
++          <p className="text-[10px] text-muted-foreground leading-tight">
++            {t("settingsPage.selfHosted.ollama.pullHint", {
++              defaultValue:
++                "Ollama uses the first loaded model. Pull a specific one with: ollama pull <name>",
++            })}
++          </p>
++        </div>
++      )}
++
++      {service === "reasoning" && isOllamaLike && probe.status === "down" && (
++        <p className="text-[11px] text-muted-foreground">
++          {t("settingsPage.selfHosted.ollama.installHint", {
++            defaultValue:
++              "Ollama not reachable. Install with: brew install ollama && brew services start ollama",
++          })}
++        </p>
++      )}
+     </div>
+   );
+ }

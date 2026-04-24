@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# talktype — single-entry CLI for all operations.
+#
+# Usage:
+#   ./talktype <command>
+#
+# Commands:
+#   start            Start backend (native Ollama; Docker fallback) + launch the app
+#   start --watch    Same as start, but auto-restart Electron on crash (Ctrl+C to stop)
+#   stop             Stop app + backend
+#   restart          Stop + start
+#   status           Show live status of all components
+#   logs [N]         Tail the last N (default 50) log lines
+#   errors           Show today's errors only
+#   doctor           Run full health diagnostic
+#   test             Run wrapper unit tests
+#   build            Build wrapper (tsc)
+#   dev              Launch app in dev mode (requires bootstrap first)
+#   bootstrap        Clone upstream, install deps, pull models (idempotent)
+#   sync             Rebase wrapper patches on latest OpenWhispr main
+#   observability    Start Loki + Grafana (http://localhost:3000)
+#   open-logs        Open log directory in Finder
+#   open-grafana     Open Grafana dashboard
+#   install-alias    Add 'ttype' alias to your shell rc (opt-in)
+#   help             Show this message
+
+set -u
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE="docker compose -f $ROOT/docker/docker-compose.yml"
+
+# OS detection — affects LOG_DIR, process kill strategy, and open-file helpers.
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32*)  TT_OS=windows ;;
+  darwin*)               TT_OS=mac ;;
+  *)                     TT_OS=linux ;;
+esac
+
+if [[ "$TT_OS" == "windows" ]]; then
+  LOG_DIR="${APPDATA:-$HOME/AppData/Roaming}/talktype"
+elif [[ "$TT_OS" == "mac" ]]; then
+  LOG_DIR="$HOME/Library/Logs/talktype"
+else
+  LOG_DIR="$HOME/.local/share/talktype"
+fi
+
+BLUE='\033[1;34m'; GREEN='\033[1;32m'; RED='\033[1;31m'; YELLOW='\033[1;33m'; DIM='\033[2m'; RESET='\033[0m'
+
+usage() {
+  sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+cmd_start() {
+  printf "${BLUE}▶ starting backend${RESET}\n"
+
+  # Native Ollama first (preferred): zero Docker, zero RAM when idle.
+  if command -v ollama >/dev/null 2>&1; then
+    if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+      printf "  ${GREEN}native ollama already running${RESET}\n"
+    else
+      if [[ "$TT_OS" == "mac" ]]; then
+        brew services start ollama >/dev/null 2>&1 || ollama serve >/dev/null 2>&1 &
+      else
+        # Windows: Ollama installs a background service (auto-starts). Linux: plain serve.
+        ollama serve >/dev/null 2>&1 &
+      fi
+      printf "${BLUE}  starting native ollama${RESET}"
+      for i in 1 2 3 4 5 6 7 8; do
+        if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+          printf "  ${GREEN}ready${RESET}\n"; break
+        fi
+        printf "."; sleep 1
+      done
+    fi
+  else
+    # Fallback: Docker compose
+    printf "${YELLOW}  native ollama not installed — using Docker${RESET}\n"
+    printf "${DIM}  (install with: brew install ollama && brew services start ollama)${RESET}\n"
+    $COMPOSE up -d ollama
+    printf "${BLUE}  waiting for Docker ollama${RESET}"
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      if curl -fsS http://localhost:11434/api/tags >/dev/null 2>&1; then
+        printf "  ${GREEN}ready${RESET}\n"; break
+      fi
+      printf "."; sleep 2
+    done
+  fi
+
+  if [[ ! -d "$ROOT/app/node_modules" ]]; then
+    printf "${YELLOW}! app/ not bootstrapped yet — run: ./talktype bootstrap${RESET}\n"
+    return 0
+  fi
+
+  if [[ "${1:-}" == "--watch" ]]; then
+    printf "${BLUE}▶ launching app (dev, watch mode — Ctrl+C to exit)${RESET}\n"
+    local restarts=0
+    trap 'printf "\n${DIM}watch mode stopped (%d restarts)${RESET}\n" "$restarts"; exit 0' INT
+    while true; do
+      (cd "$ROOT/app" && npm run dev) &
+      local pid=$!
+      echo "$pid" > "$ROOT/.talktype.pid"
+      printf "${GREEN}✓ app started (pid %s)${RESET}\n" "$pid"
+      wait "$pid" || true
+      printf "${YELLOW}✗ app exited — restarting in 2s...${RESET}\n"
+      restarts=$((restarts + 1))
+      # Nuke stuck ports before relaunch
+      pkill -9 -f "Electron.*talktype|run-electron" 2>/dev/null
+      lsof -ti:5180,5181,5182,5183,5184 2>/dev/null | xargs kill -9 2>/dev/null
+      sleep 2
+    done
+  else
+    printf "${BLUE}▶ launching app (dev)${RESET}\n"
+    (cd "$ROOT/app" && npm run dev) &
+    echo "$!" > "$ROOT/.talktype.pid"
+    printf "${GREEN}✓ app started (pid $(cat "$ROOT/.talktype.pid"))${RESET}\n"
+  fi
+}
+
+cmd_stop() {
+  # Kill the full process tree spawned by `npm run dev` — not just the top pid.
+  # concurrently forks vite + electron + whisper-server + others; the shell
+  # pidfile only tracked the subshell wrapper, leaving zombies on ports 5183 / 8180.
+  if [[ -f "$ROOT/.talktype.pid" ]]; then
+    pid=$(cat "$ROOT/.talktype.pid")
+    if kill -0 "$pid" 2>/dev/null; then
+      printf "${BLUE}▶ stopping app (pid $pid)${RESET}\n"
+      kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+    fi
+    rm -f "$ROOT/.talktype.pid"
+  fi
+
+  # Belt-and-suspenders: pattern-kill any known talktype children.
+  if [[ "$TT_OS" == "windows" ]]; then
+    # pkill/lsof don't exist on Git Bash. Filter by command line with PowerShell
+    # so we don't nuke unrelated node/electron processes from other projects.
+    powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -match 'talktype|OpenWhispr|run-electron|concurrently.*electron|vite.*OpenWhispr|whisper-server|qdrant' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+    # Free stuck dev-server ports
+    for port in 5180 5181 5182 5183 5184 8180; do
+      powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force -ErrorAction SilentlyContinue }" >/dev/null 2>&1 || true
+    done
+  else
+    pkill -9 -f "Electron.*talktype|Electron.*OpenWhispr|run-electron|concurrently.*electron|vite.*OpenWhispr|whisper-server-darwin|qdrant-darwin" 2>/dev/null || true
+    lsof -ti:5180,5181,5182,5183,5184,8180 2>/dev/null | xargs kill -9 2>/dev/null || true
+  fi
+
+  if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^talktype-ollama$'; then
+    printf "${BLUE}▶ stopping Docker backend${RESET}\n"
+    $COMPOSE down
+  else
+    printf "${DIM}▶ native ollama left running${RESET}\n"
+  fi
+}
+
+cmd_status() {
+  bash "$ROOT/scripts/status.sh"
+}
+
+cmd_logs() {
+  bash "$ROOT/scripts/logs.sh" "${1:-50}"
+}
+
+cmd_errors() {
+  local today
+  today="$(date +%F)"
+  local file="$LOG_DIR/talktype-$today.log.jsonl"
+  if [[ ! -f "$file" ]]; then
+    printf "${DIM}no log file for $today yet${RESET}\n"; return 0
+  fi
+  grep '"level":"error"' "$file" 2>/dev/null | tail -50
+}
+
+cmd_doctor()        { bash "$ROOT/scripts/doctor.sh" "$@"; }
+cmd_test()          { (cd "$ROOT/wrapper" && npm test); }
+cmd_build()         { (cd "$ROOT/wrapper" && npm run build); }
+cmd_bootstrap()     { bash "$ROOT/scripts/bootstrap.sh"; }
+cmd_sync()          { bash "$ROOT/scripts/sync-upstream.sh"; }
+
+cmd_dev() {
+  if [[ ! -d "$ROOT/app" ]]; then
+    printf "${RED}app/ missing — run: ./talktype bootstrap${RESET}\n"; exit 1
+  fi
+  (cd "$ROOT/app" && npm run dev)
+}
+
+cmd_observability() {
+  printf "${BLUE}▶ starting Loki + Grafana${RESET}\n"
+  $COMPOSE --profile observability up -d
+  printf "${GREEN}✓ Grafana at http://localhost:3000 (anonymous admin)${RESET}\n"
+}
+
+cmd_open_logs() {
+  mkdir -p "$LOG_DIR"
+  case "$TT_OS" in
+    mac)      open "$LOG_DIR" ;;
+    windows)  explorer "$(cygpath -w "$LOG_DIR")" 2>/dev/null || start "$LOG_DIR" ;;
+    *)        xdg-open "$LOG_DIR" 2>/dev/null || echo "$LOG_DIR" ;;
+  esac
+}
+
+cmd_open_grafana() {
+  local url="http://localhost:3000"
+  case "$TT_OS" in
+    mac)      open "$url" ;;
+    windows)  start "" "$url" ;;
+    *)        xdg-open "$url" 2>/dev/null || echo "$url" ;;
+  esac
+}
+
+cmd_install_alias() {
+  local rc=""
+  # On Git Bash (Windows), $SHELL is typically /usr/bin/bash — falls through
+  # the bash) case, which is what we want (writes to ~/.bashrc).
+  case "${SHELL##*/}" in
+    zsh)       rc="$HOME/.zshrc" ;;
+    bash|sh)   rc="$HOME/.bashrc" ;;
+    *)         printf "${YELLOW}unknown shell ${SHELL} — add this alias manually:${RESET}\n"
+               printf "  alias ttype='$ROOT/talktype'\n"; return 0 ;;
+  esac
+
+  # Block: alias + Ollama speedup env vars (flash attention + q8 KV cache).
+  # ~20–30%% inference speedup on Apple Silicon with no quality loss.
+  # On Windows these env vars are best set via setx / System Properties so the
+  # Ollama service picks them up; we still write them to .bashrc for anything
+  # launched from Git Bash.
+  # Idempotent: skip entire block if marker line already present.
+  if grep -Fq "# talktype" "$rc" 2>/dev/null; then
+    printf "${YELLOW}! talktype block already in $rc${RESET}\n"
+    return 0
+  fi
+  {
+    printf "\n# talktype — CLI + Ollama speedups (safe to remove)\n"
+    printf "alias ttype='%s/talktype'\n" "$ROOT"
+    printf "export OLLAMA_FLASH_ATTENTION=\"1\"\n"
+    printf "export OLLAMA_KV_CACHE_TYPE=\"q8_0\"\n"
+  } >> "$rc"
+  printf "${GREEN}✓ added 'ttype' alias + Ollama speed env vars to $rc${RESET}\n"
+  printf "${DIM}reload your shell or run: source $rc${RESET}\n"
+  if [[ "$TT_OS" == "windows" ]]; then
+    printf "${DIM}on Windows, also set these system-wide so the Ollama service sees them:${RESET}\n"
+    printf "${DIM}  setx OLLAMA_FLASH_ATTENTION 1${RESET}\n"
+    printf "${DIM}  setx OLLAMA_KV_CACHE_TYPE q8_0${RESET}\n"
+    printf "${DIM}then restart the Ollama service (Task Manager → Services → Ollama → Restart)${RESET}\n"
+  elif [[ "$TT_OS" == "mac" ]]; then
+    printf "${DIM}then restart ollama to pick up the env vars: brew services restart ollama${RESET}\n"
+  fi
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  start)          cmd_start "$@" ;;
+  stop)           cmd_stop "$@" ;;
+  restart)        cmd_stop; cmd_start ;;
+  status)         cmd_status "$@" ;;
+  logs)           cmd_logs "$@" ;;
+  errors)         cmd_errors "$@" ;;
+  doctor)         cmd_doctor "$@" ;;
+  test)           cmd_test "$@" ;;
+  build)          cmd_build "$@" ;;
+  dev)            cmd_dev "$@" ;;
+  bootstrap)      cmd_bootstrap "$@" ;;
+  sync)           cmd_sync "$@" ;;
+  observability)  cmd_observability "$@" ;;
+  open-logs)      cmd_open_logs "$@" ;;
+  open-grafana)   cmd_open_grafana "$@" ;;
+  install-alias)  cmd_install_alias "$@" ;;
+  help|-h|--help) usage ;;
+  *)              printf "${RED}unknown command: $cmd${RESET}\n\n"; usage; exit 1 ;;
+esac

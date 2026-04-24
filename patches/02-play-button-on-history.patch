@@ -1,0 +1,147 @@
+diff --git a/src/components/ui/TranscriptionItem.tsx b/src/components/ui/TranscriptionItem.tsx
+index bfaf78b..23fb4f8 100644
+--- a/src/components/ui/TranscriptionItem.tsx
++++ b/src/components/ui/TranscriptionItem.tsx
+@@ -1,8 +1,18 @@
+-import { useState } from "react";
++import { useEffect, useRef, useState } from "react";
+ import { useTranslation } from "react-i18next";
+ import { Button } from "./button";
+ import { Tooltip } from "./tooltip";
+-import { Copy, Trash2, FileText, FolderOpen, RotateCcw, Loader2, AlertCircle } from "lucide-react";
++import {
++  Copy,
++  Trash2,
++  FileText,
++  FolderOpen,
++  RotateCcw,
++  Loader2,
++  AlertCircle,
++  Play,
++  Pause,
++} from "lucide-react";
+ import type {
+   TranscriptionItem as TranscriptionItemType,
+   TranscriptionErrorCode,
+@@ -39,6 +49,76 @@ export default function TranscriptionItem({
+   const [isHovered, setIsHovered] = useState(false);
+   const [isExpanded, setIsExpanded] = useState(false);
+   const [isRetrying, setIsRetrying] = useState(false);
++  const [audioUrl, setAudioUrl] = useState<string | null>(null);
++  const [isPlaying, setIsPlaying] = useState(false);
++  const [isLoadingAudio, setIsLoadingAudio] = useState(false);
++  const audioRef = useRef<HTMLAudioElement | null>(null);
++
++  // Clean up blob URL when component unmounts or URL changes
++  useEffect(() => {
++    return () => {
++      if (audioUrl) URL.revokeObjectURL(audioUrl);
++    };
++  }, [audioUrl]);
++
++  const handlePlayPause = async () => {
++    // If already loaded, toggle play/pause
++    if (audioUrl && audioRef.current) {
++      if (isPlaying) {
++        audioRef.current.pause();
++      } else {
++        try {
++          await audioRef.current.play();
++        } catch {
++          setIsPlaying(false);
++        }
++      }
++      return;
++    }
++    // Fetch buffer and create blob URL
++    setIsLoadingAudio(true);
++    try {
++      // OpenWhispr's preload exposes the IPC surface on window.electronAPI
++      // (see preload.js: contextBridge.exposeInMainWorld("electronAPI", {...}))
++      type AudioBufferPayload =
++        | ArrayBuffer
++        | Uint8Array
++        | { type: "Buffer"; data: number[] }
++        | null;
++      const api = (
++        window as unknown as {
++          electronAPI?: { getAudioBuffer?: (id: number) => Promise<AudioBufferPayload> };
++        }
++      ).electronAPI;
++      if (!api?.getAudioBuffer) return;
++      const buf = await api.getAudioBuffer(item.id);
++      if (!buf) return;
++      // Normalize to Uint8Array — IPC may return ArrayBuffer, Uint8Array, or the
++      // { type: "Buffer", data: number[] } shape that Node Buffers serialize to.
++      let uint8: Uint8Array;
++      if (buf instanceof Uint8Array) {
++        uint8 = buf;
++      } else if (buf instanceof ArrayBuffer) {
++        uint8 = new Uint8Array(buf);
++      } else if (typeof buf === "object" && "data" in buf && Array.isArray(buf.data)) {
++        uint8 = new Uint8Array(buf.data);
++      } else {
++        return;
++      }
++      const blob = new Blob([uint8], { type: "audio/webm" });
++      const url = URL.createObjectURL(blob);
++      setAudioUrl(url);
++      // Play after one render so the <audio> element has mounted with the new src.
++      requestAnimationFrame(() => {
++        audioRef.current
++          ?.play()
++          .then(() => setIsPlaying(true))
++          .catch(() => setIsPlaying(false));
++      });
++    } finally {
++      setIsLoadingAudio(false);
++    }
++  };
+ 
+   const timestampSource = item.timestamp.endsWith("Z") ? item.timestamp : `${item.timestamp}Z`;
+   const timestampDate = new Date(timestampSource);
+@@ -180,6 +260,27 @@ export default function TranscriptionItem({
+               </Button>
+             </Tooltip>
+           )}
++          {hasAudio && (
++            <Tooltip
++              content={t("controlPanel.history.playAudio", { defaultValue: "Play audio" })}
++            >
++              <Button
++                size="icon"
++                variant="ghost"
++                onClick={handlePlayPause}
++                disabled={isLoadingAudio}
++                className="h-6 w-6 rounded-sm text-muted-foreground hover:text-primary hover:bg-primary/10"
++              >
++                {isLoadingAudio ? (
++                  <Loader2 size={12} className="animate-spin" />
++                ) : isPlaying ? (
++                  <Pause size={12} />
++                ) : (
++                  <Play size={12} />
++                )}
++              </Button>
++            </Tooltip>
++          )}
+           {hasAudio && (
+             <Tooltip content={t(getShowInFolderKey())}>
+               <Button
+@@ -255,6 +356,16 @@ export default function TranscriptionItem({
+           </div>
+         </div>
+       )}
++      {audioUrl && (
++        <audio
++          ref={audioRef}
++          src={audioUrl}
++          onPlay={() => setIsPlaying(true)}
++          onPause={() => setIsPlaying(false)}
++          onEnded={() => setIsPlaying(false)}
++          className="hidden"
++        />
++      )}
+     </div>
+   );
+ }

@@ -1,0 +1,159 @@
+diff --git a/preload.js b/preload.js
+index a231471..7c3946c 100644
+--- a/preload.js
++++ b/preload.js
+@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
+   getAudioPath: (id) => ipcRenderer.invoke("get-audio-path", id),
+   showAudioInFolder: (id) => ipcRenderer.invoke("show-audio-in-folder", id),
+   getAudioBuffer: (id) => ipcRenderer.invoke("get-audio-buffer", id),
++  // talktype patch: voice-action trigger — press a key after paste (e.g. "send it" → Enter)
++  simulateKeyPress: (keyName) => ipcRenderer.invoke("simulate-key-press", keyName),
+   deleteTranscriptionAudio: (id) => ipcRenderer.invoke("delete-transcription-audio", id),
+   getAudioStorageUsage: () => ipcRenderer.invoke("get-audio-storage-usage"),
+   deleteAllAudio: () => ipcRenderer.invoke("delete-all-audio"),
+diff --git a/src/helpers/audioManager.js b/src/helpers/audioManager.js
+index d14ad04..6a507f6 100644
+--- a/src/helpers/audioManager.js
++++ b/src/helpers/audioManager.js
+@@ -1844,8 +1844,22 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
+   }
+ 
+   async safePaste(text, options = {}) {
++    // talktype patch: voice-action triggers. If the transcript ends with a known
++    // phrase (EN or FA) we strip the phrase from the pasted text and fire the
++    // mapped key after paste. Examples:
++    //   "send him the report send it"  → paste "send him the report" + Enter
++    //   "سلام خوبی بفرستش"              → paste "سلام خوبی" + Enter
++    // Defaults only; no settings UI yet (user can ask to extend).
++    const { text: outText, actionKey } = this._detectVoiceAction(text);
+     try {
+-      await window.electronAPI.pasteText(text, options);
++      await window.electronAPI.pasteText(outText, options);
++      if (actionKey && window.electronAPI?.simulateKeyPress) {
++        // Small delay so the app's own paste-then-clipboard-restore (~230 ms)
++        // finishes before we punch Enter. Prevents racing into a still-focused
++        // paste operation.
++        await new Promise((r) => setTimeout(r, 300));
++        window.electronAPI.simulateKeyPress(actionKey).catch(() => {});
++      }
+       return true;
+     } catch (error) {
+       const message =
+@@ -1859,6 +1873,51 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
+     }
+   }
+ 
++  // talktype patch: voice-action trigger detection.
++  _detectVoiceAction(text) {
++    if (typeof text !== "string" || !text) return { text, actionKey: null };
++    // Each entry: [regex matching the trigger at end of text, key to fire].
++    // Regex captures trailing punctuation + whitespace so the strip is clean.
++    // Persian + English. `u` flag enables full Unicode matching.
++    // Shared tail fragment — colloquial filler that may follow a Persian trigger.
++    // e.g. "بفرست بره", "بفرست دیگه", "انجام بده همین الان".
++    const FA_TAIL = String.raw`(?:\s+(?:بره|برو|بعد|دیگه|همین\s*الان|همین|این|اون|الان))*`;
++
++    const RULES = [
++      // ── Enter / Return ─────────────────────────────────────────────
++      // English
++      [/(?:^|[\s,.!?;:])(?:send\s+(?:it|this|message)|press\s+enter|hit\s+enter|submit(?:\s+it)?|post\s+(?:it|this)|go\s+ahead|do\s+it|send\s+go)[\s.!?]*$/iu, "return"],
++      // Persian (Farsi) — colloquial + formal forms.
++      // Handles leading-only-trigger (no separator required), optional colloquial tail,
++      // and the common Whisper typo "به فرستش" (space inserted by the ASR).
++      [new RegExp(
++        `(?:^|[\\s،.!؟؛:])(?:بفرستش|بفرستیدش|ارسالش\\s*کن|ارسال\\s*کن|بفرست|اوکی\\s*کن|تایید\\s*کن|انجام\\s*بده|اجرا(?:ش)?\\s*کن|به\\s+فرستش|ارسال)${FA_TAIL}[\\s.،!؟]*$`,
++        "iu"
++      ), "return"],
++
++      // ── Tab ────────────────────────────────────────────────────────
++      [/(?:^|[\s,.!?;:])(?:press\s+tab|hit\s+tab|next\s+field|tab\s+over)[\s.!?]*$/iu, "tab"],
++      [new RegExp(
++        `(?:^|[\\s،.!؟؛:])(?:تب\\s*بزن|فیلد\\s*بعدی|برو\\s*بعدی)${FA_TAIL}[\\s.،!؟]*$`,
++        "iu"
++      ), "tab"],
++
++      // ── Escape / Cancel ────────────────────────────────────────────
++      [/(?:^|[\s,.!?;:])(?:press\s+escape|hit\s+escape|cancel\s+(?:this|it)|close\s+(?:this|it|dialog))[\s.!?]*$/iu, "escape"],
++      [new RegExp(
++        `(?:^|[\\s،.!؟؛:])(?:کنسل\\s*کن|ببندش|لغوش\\s*کن|بی\\s*خیال)${FA_TAIL}[\\s.،!؟]*$`,
++        "iu"
++      ), "escape"],
++    ];
++    for (const [re, key] of RULES) {
++      if (re.test(text)) {
++        const stripped = text.replace(re, "").trimEnd();
++        return { text: stripped, actionKey: key };
++      }
++    }
++    return { text, actionKey: null };
++  }
++
+   async saveTranscription(text, rawText = null) {
+     if (!getSettings().dataRetentionEnabled) {
+       logger.debug("Skipping transcription save — data retention disabled", {}, "audio");
+diff --git a/src/helpers/ipcHandlers.js b/src/helpers/ipcHandlers.js
+index 18a372c..a2b232a 100644
+--- a/src/helpers/ipcHandlers.js
++++ b/src/helpers/ipcHandlers.js
+@@ -743,6 +743,42 @@ class IPCHandlers {
+       return buffer ? buffer.buffer : null;
+     });
+ 
++    // talktype patch: simulate a single key press (for post-paste voice actions
++    // like "send it" → Enter). macOS uses osascript; Windows uses PowerShell
++    // SendKeys. Safelist keeps the surface small; grow deliberately.
++    ipcMain.handle("simulate-key-press", async (event, keyName) => {
++      try {
++        const SAFE_KEYS_MAC = {
++          return: 36, // macOS key codes for System Events "key code N"
++          enter: 36,
++          tab: 48,
++          escape: 53,
++        };
++        const SAFE_KEYS_WIN = {
++          return: "{ENTER}",
++          enter: "{ENTER}",
++          tab: "{TAB}",
++          escape: "{ESC}",
++        };
++        const normalized = String(keyName || "").toLowerCase();
++        const { spawn } = require("child_process");
++        if (process.platform === "darwin") {
++          const code = SAFE_KEYS_MAC[normalized];
++          if (!code) return { success: false, error: `key '${keyName}' not in safelist` };
++          await new Promise((resolve, reject) => {
++            const proc = spawn("osascript", [
++              "-e",
++              `tell application "System Events" to key code ${code}`,
++            ]);
++            proc.on("error", reject);
++            proc.on("close", (exitCode) =>
++              exitCode === 0 ? resolve() : reject(new Error(`osascript exit ${exitCode}`))
++            );
++          });
++        } else if (process.platform === "win32") {
++          const keystroke = SAFE_KEYS_WIN[normalized];
++          if (!keystroke) return { success: false, error: `key '${keyName}' not in safelist` };
++          await new Promise((resolve, reject) => {
++            const proc = spawn("powershell", [
++              "-NoProfile",
++              "-Command",
++              `[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); [System.Windows.Forms.SendKeys]::SendWait('${keystroke}')`,
++            ]);
++            proc.on("error", reject);
++            proc.on("close", (code) =>
++              code === 0 ? resolve() : reject(new Error(`powershell exit ${code}`))
++            );
++          });
++        } else {
++          return { success: false, error: `simulate-key-press: ${process.platform} not implemented yet` };
++        }
++        return { success: true };
++      } catch (err) {
++        return { success: false, error: err.message };
++      }
++    });
++
+     ipcMain.handle("delete-transcription-audio", async (event, id) => {
+       const result = this.audioStorageManager.deleteAudio(id);
+       if (result.success) {

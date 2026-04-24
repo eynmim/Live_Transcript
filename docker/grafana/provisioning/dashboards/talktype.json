@@ -1,0 +1,94 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "pluginVersion": "11.1.0",
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({app=\"talktype\"} |= \"\\\"level\\\":\\\"error\\\"\" [5m]))", "refId": "A" }
+      ],
+      "title": "Errors (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } }, "overrides": [] },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({app=\"talktype\"} |= \"cleanup.done\" [5m]))", "refId": "A" }
+      ],
+      "title": "Dictations (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({app=\"talktype\"} |= \"fallback.\" [5m]))", "refId": "A" }
+      ],
+      "title": "Fallback events (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({app=\"talktype\"} |= \"panic.\" [1h]))", "refId": "A" }
+      ],
+      "title": "Panic dumps (1h)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (level) (rate({app=\"talktype\"} | json | __error__=\"\" [1m]))", "refId": "A" }
+      ],
+      "title": "Event rate by level",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "dedupStrategy": "none", "showLabels": false, "showTime": true, "sortOrder": "Descending", "wrapLogMessage": true },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "loki" }, "expr": "{app=\"talktype\"} |= \"\\\"level\\\":\\\"error\\\"\"", "refId": "A" }
+      ],
+      "title": "Recent errors",
+      "type": "logs"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["talktype"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "talktype",
+  "uid": "talktype",
+  "version": 1,
+  "weekStart": ""
+}
