@@ -67,3 +67,6 @@ old-python/__pycache__/
 *.m4a
 *.flac
 transcript_*.txt
+
+# user-generated transcripts (private, never commit)
+transcripts/
