@@ -1,0 +1,16 @@
+diff --git a/src/helpers/whisperServer.js b/src/helpers/whisperServer.js
+index 10d3a21..981a929 100644
+--- a/src/helpers/whisperServer.js
++++ b/src/helpers/whisperServer.js
+@@ -12,7 +12,10 @@ const { convertToWav } = require("./ffmpegUtils");
+ 
+ const PORT_RANGE_START = 8178;
+ const PORT_RANGE_END = 8199;
+-const STARTUP_TIMEOUT_MS = 30000;
++// Large GGML models (turbo/large-v3, ~1.6-3GB) can take 30-60s+ to load into
++// VRAM on a cold CUDA start, exceeding the old 30s cap and failing dictation
++// even though the server comes up moments later. 120s gives ample headroom.
++const STARTUP_TIMEOUT_MS = 120000;
+ const HEALTH_CHECK_INTERVAL_MS = 5000;
+ const HEALTH_CHECK_TIMEOUT_MS = 2000;
+ 

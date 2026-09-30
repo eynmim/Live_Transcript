@@ -1,0 +1,132 @@
+diff --git a/resources/windows-key-listener.c b/resources/windows-key-listener.c
+index a809419..cc8b73e 100644
+--- a/resources/windows-key-listener.c
++++ b/resources/windows-key-listener.c
+@@ -106,6 +106,59 @@ static BOOL AreRequiredModifiersPressed(void) {
+ }
+ 
+ // Map key name to virtual key code
++// ---------------------------------------------------------------------------
++// Async stdout writer.
++// A WH_KEYBOARD_LL callback that runs longer than LowLevelHooksTimeout (1000 ms
++// by default) is SILENTLY removed by Windows — the process keeps running but the
++// hotkey stops working until restart. Doing printf()/fflush() inside the callback
++// risks exactly that: if the parent (Node) is momentarily busy and the stdout
++// pipe fills, fflush() blocks. So the hook only enqueues an event code here and a
++// dedicated thread performs the blocking write. The hook never touches stdout.
++// ---------------------------------------------------------------------------
++#define KL_QCAP 1024
++static int g_klQueue[KL_QCAP];
++static int g_klHead = 0;   // written by the hook (producer)
++static int g_klTail = 0;   // read by the writer thread (consumer)
++static CRITICAL_SECTION g_klCs;
++static HANDLE g_klEvt = NULL;   // auto-reset: signalled on each enqueue
++static volatile LONG g_klRunning = 1;
++
++// Called from the hook. The critical section is held only for the few
++// instructions it takes to push one int — never across any I/O — so the hook
++// callback returns well within the timeout regardless of pipe backpressure.
++static void KlEmit(int code) {
++    EnterCriticalSection(&g_klCs);
++    int next = (g_klHead + 1) % KL_QCAP;
++    if (next != g_klTail) {          // drop only if the ring is full (never in practice)
++        g_klQueue[g_klHead] = code;
++        g_klHead = next;
++    }
++    LeaveCriticalSection(&g_klCs);
++    if (g_klEvt) SetEvent(g_klEvt);
++}
++
++// Consumer thread: drains the ring and does the blocking printf/fflush here,
++// off the hook/message thread. 1 = KEY_DOWN, 2 = KEY_UP.
++static DWORD WINAPI KlWriterThread(LPVOID unused) {
++    (void)unused;
++    while (g_klRunning) {
++        WaitForSingleObject(g_klEvt, 200);   // event, or 200 ms poll so the thread can exit
++        for (;;) {
++            int code = 0;
++            EnterCriticalSection(&g_klCs);
++            if (g_klTail != g_klHead) {
++                code = g_klQueue[g_klTail];
++                g_klTail = (g_klTail + 1) % KL_QCAP;
++            }
++            LeaveCriticalSection(&g_klCs);
++            if (code == 0) break;            // ring drained
++            printf(code == 1 ? "KEY_DOWN\n" : "KEY_UP\n");
++            fflush(stdout);
++        }
++    }
++    return 0;
++}
++
+ DWORD ParseKeyCode(const char* keyName) {
+     // Function keys (F1-F12)
+     if (_stricmp(keyName, "F1") == 0) return VK_F1;
+@@ -205,8 +258,7 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+         if (g_isKeyDown && isKeyUp && IsRequiredModifierEvent(kbd->vkCode) &&
+             !AreRequiredModifiersPressed()) {
+             g_isKeyDown = FALSE;
+-            printf("KEY_UP\n");
+-            fflush(stdout);
++            KlEmit(2);
+         }
+ 
+         // Self-heal a missed target-key KEY_UP. GetAsyncKeyState is only reliable
+@@ -214,22 +266,19 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+         if (g_isKeyDown && !g_useModifiersOnly && kbd->vkCode != g_targetVk &&
+             !(GetAsyncKeyState(g_targetVk) & 0x8000)) {
+             g_isKeyDown = FALSE;
+-            printf("KEY_UP\n");
+-            fflush(stdout);
++            KlEmit(2);
+         }
+ 
+         if (g_useModifiersOnly) {
+             if (isKeyDown) {
+                 if (!g_isKeyDown && AreRequiredModifiersPressed()) {
+                     g_isKeyDown = TRUE;
+-                    printf("KEY_DOWN\n");
+-                    fflush(stdout);
++                    KlEmit(1);
+                 }
+             } else if (isKeyUp) {
+                 if (g_isKeyDown && !AreRequiredModifiersPressed()) {
+                     g_isKeyDown = FALSE;
+-                    printf("KEY_UP\n");
+-                    fflush(stdout);
++                    KlEmit(2);
+                 }
+             }
+             return CallNextHookEx(g_hook, nCode, wParam, lParam);
+@@ -241,15 +290,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
+                 // Only trigger if modifiers are satisfied and not already down
+                 if (!g_isKeyDown && AreRequiredModifiersPressed()) {
+                     g_isKeyDown = TRUE;
+-                    printf("KEY_DOWN\n");
+-                    fflush(stdout);
++                    KlEmit(1);
+                 }
+             } else if (isKeyUp) {
+                 // Target key released
+                 if (g_isKeyDown) {
+                     g_isKeyDown = FALSE;
+-                    printf("KEY_UP\n");
+-                    fflush(stdout);
++                    KlEmit(2);
+                 }
+             }
+         }
+@@ -360,6 +407,13 @@ int main(int argc, char* argv[]) {
+     printf("READY\n");
+     fflush(stdout);
+ 
++    // Start the async stdout writer before the message loop begins. Hook
++    // callbacks only fire once the loop dispatches messages, so the writer
++    // infrastructure is guaranteed initialised before the first KlEmit().
++    InitializeCriticalSection(&g_klCs);
++    g_klEvt = CreateEvent(NULL, FALSE, FALSE, NULL);   // auto-reset
++    CreateThread(NULL, 0, KlWriterThread, NULL, 0, NULL);
++
+     // Message loop - required for low-level hooks to work
+     MSG msg;
+     while (GetMessage(&msg, NULL, 0, 0) > 0) {

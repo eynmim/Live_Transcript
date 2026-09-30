@@ -1,0 +1,93 @@
+diff --git a/main.js b/main.js
+index 4c11863..9e34368 100644
+--- a/main.js
++++ b/main.js
+@@ -260,6 +303,7 @@ let trayManager = null;
+ let updateManager = null;
+ let globeKeyManager = null;
+ let windowsKeyManager = null;
++let windowsToggleKeyManager = null;
+ let linuxKeyManager = null;
+ let textEditMonitor = null;
+ let whisperCudaManager = null;
+@@ -345,6 +389,7 @@ function initializeCoreManagers() {
+   updateManager = new UpdateManager();
+   updateManager.setWindowManager(windowManager);
+   windowsKeyManager = new WindowsKeyManager();
++  windowsToggleKeyManager = new WindowsKeyManager();
+   linuxKeyManager = new LinuxKeyManager();
+   textEditMonitor = new TextEditMonitor();
+   audioTapManager = new AudioTapManager();
+@@ -1079,6 +1124,37 @@ async function startApp() {
+         windowsKeyManager.start(hotkey);
+       }
+     });
++
++    // Second, independent dictation trigger: a latch/toggle key (e.g. Control+Alt)
++    // that starts recording on first press and stops it on the next press, no matter
++    // what activation mode the primary hotkey uses. Off unless DICTATION_TOGGLE_KEY set.
++    windowsToggleKeyManager.on("key-down", () => {
++      if (!isLiveWindow(windowManager.mainWindow)) return;
++      if (textEditMonitor) textEditMonitor.captureTargetPid();
++      windowManager.sendToggleDictation();
++    });
++    windowsToggleKeyManager.on("unavailable", () => {
++      debugLogger.warn(
++        "[Push-to-Talk] toggle-key listener unavailable (native binary missing)"
++      );
++    });
++
++    const startWindowsToggleListener = () => {
++      if (!isLiveWindow(windowManager.mainWindow)) return;
++      const toggleKey = environmentManager.getDictationToggleKey?.() || "";
++      if (toggleKey) {
++        windowsToggleKeyManager.start(toggleKey);
++      }
++    };
++    setTimeout(startWindowsToggleListener, STARTUP_DELAY_MS);
++
++    ipcMain.on("dictation-toggle-key-changed", (_event, toggleKey) => {
++      if (!isLiveWindow(windowManager.mainWindow)) return;
++      windowsToggleKeyManager.stop();
++      if (toggleKey) {
++        windowsToggleKeyManager.start(toggleKey);
++      }
++    });
+   }
+ 
+   if (process.platform === "linux") {
+@@ -1323,6 +1399,9 @@ if (gotSingleInstanceLock) {
+     if (windowsKeyManager) {
+       windowsKeyManager.stop();
+     }
++    if (windowsToggleKeyManager) {
++      windowsToggleKeyManager.stop();
++    }
+     if (linuxKeyManager) {
+       linuxKeyManager.stop();
+     }
+diff --git a/src/helpers/environment.js b/src/helpers/environment.js
+index 9d05c4e..89f5dba 100644
+--- a/src/helpers/environment.js
++++ b/src/helpers/environment.js
+@@ -20,6 +20,7 @@ const PERSISTED_KEYS = [
+   "LLAMA_GPU_BACKEND",
+   "LLAMA_VULKAN_ENABLED",
+   "DICTATION_KEY",
++  "DICTATION_TOGGLE_KEY",
+   "AGENT_KEY",
+   "MEETING_KEY",
+   "ACTIVATION_MODE",
+@@ -222,6 +223,12 @@ class EnvironmentManager {
+     return this._getKey("DICTATION_KEY");
+   }
+ 
++  // Optional second dictation trigger that toggles (latches) recording on/off,
++  // independent of the primary hotkey's activation mode. Empty = feature off.
++  getDictationToggleKey() {
++    return this._getKey("DICTATION_TOGGLE_KEY");
++  }
++
+   saveDictationKey(key) {
+     const result = this._saveKey("DICTATION_KEY", key);
+     this.saveAllKeysToEnvFile().catch(() => {});
